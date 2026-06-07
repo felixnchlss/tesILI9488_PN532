@@ -2,28 +2,28 @@
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include "time.h"
-#include <Wire.h>             //
-#include <SPI.h>              //
-#include <Adafruit_PN532.h>   //
+
+// --- Include Library untuk PN532 I2C ---
+#include <Wire.h>
+#include <Adafruit_PN532.h>
 
 // --- Konfigurasi WiFi & Waktu (WIB) ---
 const char* ssid       = "CEIOT";     // Ganti dengan nama WiFi Anda
-const char* password   = "CE-1OT@!"; // Ganti dengan password WiFi
+const char* password   = "CE-1OT@!";  // Ganti dengan password WiFi
 const char* ntpServer  = "pool.ntp.org";
-const long  gmtOffset_sec = 7 * 3600;          // Zona Waktu WIB (UTC+7)
+const long  gmtOffset_sec = 7 * 3600; // Zona Waktu WIB (UTC+7)
 const int   daylightOffset_sec = 0;
 
 // --- Konfigurasi Pin Rotary Encoder ---
-#define PIN_ENCODER_A 26  // DT
-#define PIN_ENCODER_B 27  // CLK
-#define PIN_TOMBOL 25     // SW
+#define PIN_ENCODER_A 32  // DT  (Aman untuk upload)
+#define PIN_ENCODER_B 13  // CLK
+#define PIN_TOMBOL 14     // SW
 
-// --- Konfigurasi Pin RFID PN532 (I2C) ---
-// Karena menggunakan I2C, definisikan pin IRQ dan RESET. Jika secara fisik 
-// tidak dihubungkan pada modul, kita gunakan pin dummy (bebas).
-#define PN532_IRQ   (32)
-#define PN532_RESET (33) 
-Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET); //
+// --- Konfigurasi Pin Dummy PN532 (Wajib untuk Constructor) ---
+// Penggunaan aslinya diatur oleh pin default I2C ESP32 (SDA=21, SCL=22)
+#define PN532_IRQ   2 
+#define PN532_RESET 3 
+Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -105,20 +105,36 @@ void gambarMenu() {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-
-  // --- Inisialisasi Layar ---
-  tft.init();
-  tft.setRotation(1);
+// --- Fungsi Recovery Tampilan (Untuk mengembalikan elemen UI atas) ---
+void gambarHeader() {
   tft.fillScreen(TFT_BLACK);
-
-  // Gambar Judul
   tft.setTextFont(4);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("Select Purpose:", 10, 10);
   tft.drawLine(10, 40, tft.width() - 10, 40, TFT_CYAN);
+  detikTerakhir = -1; // Memaksa jam tergambar ulang di loop
+  menuBerubah = true; // Memaksa menu tergambar ulang
+}
+
+void setup() {
+  Serial.begin(115200);
+
+    // --- Inisialisasi PN532 (I2C) ---
+  nfc.begin();
+  uint32_t versiondata = nfc.getFirmwareVersion();
+  if (!versiondata) {
+    Serial.println("PN532 tidak ditemukan. Periksa kabel!");
+  } else {
+    Serial.print("Ditemukan chip PN5"); Serial.println((versiondata >> 24) & 0xFF, HEX);
+    nfc.SAMConfig(); // Setup PN532 untuk membaca kartu
+    Serial.println("Sistem PN532 Siap. Menunggu kartu...");
+  }
+
+  // --- Inisialisasi Layar ---
+  tft.init();
+  tft.setRotation(1);
+  gambarHeader();
 
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
@@ -140,71 +156,25 @@ void setup() {
     tft.fillRect(tft.width() - 100, 0, 100, 30, TFT_BLACK); 
   }
 
-  // --- Inisialisasi RFID PN532 ---
-  nfc.begin(); //
-  uint32_t versiondata = nfc.getFirmwareVersion(); //
-  if (!versiondata) { //
-    Serial.println("Tidak menemukan modul PN532");
-  } else {
-    Serial.print("Ditemukan chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX);
-    
-    // Setting retries menjadi sangat minim (0x01) agar tidak menyebabkan blocking.
-    // Jika tidak dibatasi, program akan "tersangkut" saat tidak ada kartu dan LCD akan macet.
-    nfc.setPassiveActivationRetries(0x01);
-    nfc.SAMConfig();
-  }
-
   // --- Konfigurasi Pin Encoder ---
   pinMode(PIN_ENCODER_A, INPUT_PULLUP);
   pinMode(PIN_ENCODER_B, INPUT_PULLUP);
   pinMode(PIN_TOMBOL, INPUT_PULLUP);
 
   attachInterrupt(digitalPinToInterrupt(PIN_ENCODER_A), bacaEncoder, FALLING);
+  Serial.println("Sistem Siap! Coba putar encoder.");
 }
 
 void loop() {
-  // Panggil fungsi jam terus menerus
+  // Update Jam dan Menu di Layar
   tampilkanJam();
 
-  // Update menu jika berubah
   if (menuBerubah) {
     gambarMenu();
     menuBerubah = false;
   }
 
-  // --- Cek Pembacaan RFID PN532 ---
-  uint8_t success;
-  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 }; // Buffer untuk menyimpan UID kartu
-  uint8_t uidLength;                       // Menyimpan Panjang UID
-  
-  // Baca kartu NFC (Non-blocking karena batas timeout sudah kita atur di setup)
-  success = nfc.readDetectedPassiveTargetID(uid, &uidLength);
-  
-  if (success) { // Jika kartu berhasil terdeteksi
-    Serial.println("KARTU DITEMUKAN!");
-    
-    // Ubah tampilan LCD
-    tft.fillScreen(TFT_BLUE); // Gunakan biru atau warna mencolok lain
-    tft.setTextColor(TFT_WHITE);
-    tft.setTextDatum(MC_DATUM); 
-    tft.drawString("Kartu Ditemukan!", tft.width()/2, tft.height()/2);
-    
-    delay(2000); // Tahan pesan selama 2 detik
-    
-    // --- Kembalikan layar ke kondisi semula ---
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextFont(4);
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString("Select Purpose:", 10, 10);
-    tft.drawLine(10, 40, tft.width() - 10, 40, TFT_CYAN);
-    
-    // Paksa refresh jam & menu agar dirender kembali
-    detikTerakhir = -1; 
-    menuBerubah = true; 
-  }
-
-  // --- Cek tombol Rotary ditekan ---
+  // --- 1. Cek tombol Rotary ditekan ---
   if (digitalRead(PIN_TOMBOL) == LOW) {
     delay(50); 
     if (digitalRead(PIN_TOMBOL) == LOW) { 
@@ -219,19 +189,28 @@ void loop() {
       tft.drawString(menuItems[indexMenu], tft.width()/2, tft.height()/2 + 20);
       
       delay(1200); 
-      
-      // Kembalikan layar
-      tft.fillScreen(TFT_BLACK);
-      tft.setTextFont(4);
-      tft.setTextColor(TFT_CYAN, TFT_BLACK);
-      tft.setTextDatum(TL_DATUM);
-      tft.drawString("Select Purpose:", 10, 10);
-      tft.drawLine(10, 40, tft.width() - 10, 40, TFT_CYAN);
-      
-      detikTerakhir = -1; 
-      menuBerubah = true; 
-      
+      gambarHeader();
       while(digitalRead(PIN_TOMBOL) == LOW); 
     }
+  }
+
+  // --- 2. Cek Deteksi Kartu RFID ---
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer penyimpan UID 
+  uint8_t uidLength;                        // Panjang UID
+
+  // Coba mendeteksi kartu (Pakai timeout 50ms agar looping jam & menu tidak macet)
+  bool success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 50);
+  
+  if (success) {
+    Serial.println("Kartu RFID Terdeteksi!");
+
+    // Menampilkan tulisan "Kartu terdeteksi" di layar
+    tft.fillScreen(TFT_BLUE); 
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextDatum(MC_DATUM); 
+    tft.drawString("Kartu terdeteksi", tft.width()/2, tft.height()/2);
+    
+    delay(2000); // Tahan tampilan selama 2 detik sebelum kembali ke menu
+    gambarHeader();
   }
 }
